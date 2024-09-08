@@ -1,33 +1,36 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use teloxide::prelude::*;
+
+use clap::Parser;
 use color_eyre::eyre::eyre;
 use color_eyre::eyre::Context;
 use color_eyre::eyre::OptionExt;
 use color_eyre::eyre::Result;
-use color_eyre::owo_colors::OwoColorize;
-use teloxide::dispatching::dialogue;
-use teloxide::dispatching::dialogue::GetChatId;
-use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::dispatching::UpdateFilterExt;
-use teloxide::dispatching::UpdateHandler;
-use teloxide::prelude::*;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::io::Lines;
 use tokio::sync::Mutex;
-use tokio_serial::SerialPort;
-use tokio_serial::SerialPortType;
 use tokio_serial::SerialStream;
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Path of the serial port where the Arduino is connected
+    serial_path: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
     pretty_env_logger::init();
-    log::info!("Starting despachobot...");
 
-    let microcontroller_observer = MicrocontrollerObserver::acquire().await?;
+    let cli = Cli::parse();
+
+    let microcontroller_observer = MicrocontrollerObserver::acquire(&cli.serial_path).await?;
 
     let bot = Bot::from_env();
     let schema = Update::filter_message()
@@ -98,9 +101,7 @@ struct MicrocontrollerObserver(Lines<BufReader<SerialStream>>);
 impl MicrocontrollerObserver {
     const SUPPORTED_PROTOCOL_VERSION: u8 = 0;
 
-    pub async fn acquire() -> Result<Self> {
-        let serial_port_name = "/dev/ttyACM0";
-
+    pub async fn acquire(serial_port_name: &str) -> Result<Self> {
         let serial_stream = SerialStream::open(&tokio_serial::new(serial_port_name, 115200))
             .wrap_err_with(|| {
                 format!(
