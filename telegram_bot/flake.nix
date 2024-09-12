@@ -15,7 +15,8 @@
       {
         devShells.default = with pkgs; mkShell {
           buildInputs = [
-            openssl
+            pkg-config
+            openssl.dev
             (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
           ];
         };
