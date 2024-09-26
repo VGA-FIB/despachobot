@@ -1,22 +1,14 @@
 use std::sync::Arc;
-use std::time::Duration;
-
-use teloxide::prelude::*;
 
 use clap::Parser;
-use color_eyre::eyre::eyre;
-use color_eyre::eyre::Context;
-use color_eyre::eyre::OptionExt;
 use color_eyre::eyre::Result;
-use teloxide::dispatching::UpdateFilterExt;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::io::BufReader;
-use tokio::io::Lines;
+use microcontroller::Microcontroller;
+use teloxide::prelude::*;
 use tokio::sync::Mutex;
-use tokio_serial::SerialPort;
-use tokio_serial::SerialPortBuilderExt;
-use tokio_serial::SerialStream;
+
+mod codecs;
+mod microcontroller;
+mod schema;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -32,179 +24,16 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let microcontroller_observer = MicrocontrollerObserver::acquire(&cli.serial_path).await?;
+    let microcontroller = Microcontroller::acquire(&cli.serial_path).await?;
 
     let bot = Bot::from_env();
-    let schema = Update::filter_message()
-        .filter_map(|update: Update| update.from().cloned())
-        .branch(
-            Message::filter_text()
-                .filter(|text: String| text.to_lowercase().contains("alguien despacho"))
-                .endpoint(answer_alguien_despacho),
-        );
 
-    Dispatcher::builder(bot, schema)
-        .dependencies(dptree::deps![Arc::new(Mutex::new(
-            microcontroller_observer
-        ))])
+    Dispatcher::builder(bot, schema::schema())
+        .dependencies(dptree::deps![Arc::new(Mutex::new(microcontroller))])
+        .enable_ctrlc_handler()
+        .default_handler(|_| async {})
         .build()
         .dispatch()
         .await;
     Ok(())
-}
-
-async fn answer_alguien_despacho(
-    bot: Bot,
-    msg: Message,
-    microcontroller_observer: Arc<Mutex<MicrocontrollerObserver>>,
-) -> Result<()> {
-    let answer = if microcontroller_observer.lock().await.get_state().await? {
-        "Ahora mismo hay alguien!"
-    } else {
-        let diff = microcontroller_observer
-            .lock()
-            .await
-            .get_last_falling()
-            .await?;
-        let diff_duration = round_duration(&Duration::from_millis(diff));
-
-        &format!(
-            "No he visto a nadie desde hace {}...",
-            humantime::format_duration(diff_duration)
-        )
-    };
-
-    bot.send_message(msg.chat.id, answer)
-        .await
-        .wrap_err("Failed to send message")?;
-    Ok(())
-}
-
-fn round_duration(duration: &Duration) -> Duration {
-    let mut secs = duration.as_millis() / 1000;
-
-    if secs > 60 {
-        secs = secs - (secs % 60);
-    }
-
-    if secs > 3600 {
-        secs = secs - (secs % 3600);
-    }
-
-    if secs > 24 * 3600 {
-        secs = secs - (secs % (24 * 3600));
-    }
-
-    Duration::from_secs(secs as u64)
-}
-
-struct MicrocontrollerObserver(Lines<BufReader<SerialStream>>);
-
-impl MicrocontrollerObserver {
-    const SUPPORTED_PROTOCOL_VERSION: u8 = 0;
-
-    pub async fn acquire(serial_port_name: &str) -> Result<Self> {
-        let serial_stream = tokio_serial::new(serial_port_name, 115200)
-            .open_native_async()
-            .wrap_err_with(|| {
-                format!(
-                    "Failed to open the Arduino serial port ({})",
-                    serial_port_name
-                )
-            })?;
-
-        serial_stream
-            .clear(tokio_serial::ClearBuffer::All)
-            .wrap_err("Failed to clear the Arduino serial buffer")?;
-
-        let lines = BufReader::new(serial_stream).lines();
-
-        let mut new = Self(lines);
-
-        // Test if the arduino responds
-        new.ping().await?;
-
-        // Test if the protocol is compatible
-        if new.get_protocol_version().await? != Self::SUPPORTED_PROTOCOL_VERSION {
-            return Err(eyre!(
-                "Arduino is running on an unsupported protocol version"
-            ));
-        }
-
-        Ok(new)
-    }
-
-    pub async fn send_command(&mut self, command: &str) -> Result<String> {
-        self.0
-            .get_mut()
-            .write(command.as_bytes())
-            .await
-            .wrap_err("Failed to send command to Arduino")?;
-
-        self.0
-            .get_mut()
-            .write(b"\n")
-            .await
-            .wrap_err("Failed to send command end to Arduino")?;
-
-        self.0
-            .get_mut()
-            .flush()
-            .await
-            .wrap_err("Failed to flush command buffer")?;
-
-        self.0
-            .next_line()
-            .await
-            .wrap_err("Failed to receive command response from Arduino")?
-            .ok_or_eyre("Empty command response")
-            .map(|r| r.trim().to_owned())
-    }
-
-    pub async fn ping(&mut self) -> Result<()> {
-        let response = self
-            .send_command("ping")
-            .await
-            .wrap_err("Failed to ping Arduino")?;
-
-        if response == "1" {
-            Ok(())
-        } else {
-            Err(eyre!("Unexpected Arduino ping response"))
-        }
-    }
-
-    pub async fn get_protocol_version(&mut self) -> Result<u8> {
-        let response = self
-            .send_command("get_protocol_version")
-            .await
-            .wrap_err("Failed to query Arduino protocol version")?;
-
-        response
-            .parse()
-            .wrap_err("Failed to parse Arduino protocol version")
-    }
-
-    pub async fn get_state(&mut self) -> Result<bool> {
-        let response = self
-            .send_command("get_state")
-            .await
-            .wrap_err("Failed to query Arduino sensor data")?;
-
-        response
-            .parse::<u8>()
-            .map(|x| x == 1)
-            .wrap_err("Failed to parse Arduino sensor state")
-    }
-
-    pub async fn get_last_falling(&mut self) -> Result<u64> {
-        let response = self
-            .send_command("get_last_falling")
-            .await
-            .wrap_err("Failed to query last Arduino sensor falling edge")?;
-
-        response
-            .parse()
-            .wrap_err("Failed to parse last Arduino sensor falling edge")
-    }
 }

@@ -1439,12 +1439,15 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "color-eyre",
+ "futures-util",
  "humantime",
  "log",
  "pretty_env_logger",
  "teloxide",
  "tokio",
  "tokio-serial",
+ "tokio-stream",
+ "tokio-util",
 ]
 
 [[package]]
