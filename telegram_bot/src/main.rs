@@ -14,6 +14,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::io::Lines;
 use tokio::sync::Mutex;
+use tokio_serial::SerialPort;
+use tokio_serial::SerialPortBuilderExt;
 use tokio_serial::SerialStream;
 
 #[derive(Parser)]
@@ -102,13 +104,18 @@ impl MicrocontrollerObserver {
     const SUPPORTED_PROTOCOL_VERSION: u8 = 0;
 
     pub async fn acquire(serial_port_name: &str) -> Result<Self> {
-        let serial_stream = SerialStream::open(&tokio_serial::new(serial_port_name, 115200))
+        let serial_stream = tokio_serial::new(serial_port_name, 115200)
+            .open_native_async()
             .wrap_err_with(|| {
                 format!(
                     "Failed to open the Arduino serial port ({})",
                     serial_port_name
                 )
             })?;
+
+        serial_stream
+            .clear(tokio_serial::ClearBuffer::All)
+            .wrap_err("Failed to clear the Arduino serial buffer")?;
 
         let lines = BufReader::new(serial_stream).lines();
 
@@ -133,6 +140,18 @@ impl MicrocontrollerObserver {
             .write(command.as_bytes())
             .await
             .wrap_err("Failed to send command to Arduino")?;
+
+        self.0
+            .get_mut()
+            .write(b"\n")
+            .await
+            .wrap_err("Failed to send command end to Arduino")?;
+
+        self.0
+            .get_mut()
+            .flush()
+            .await
+            .wrap_err("Failed to flush command buffer")?;
 
         self.0
             .next_line()
